@@ -47,7 +47,7 @@ jobs:
           distribution: ${{ inputs.java-distribution }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Build
         run: ${{ inputs.build-command }}
@@ -85,11 +85,11 @@ jobs:
           distribution: ${{ inputs.java-distribution }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # Feeds the GitHub dependency graph → enables Dependabot security alerts
       - name: Submit dependency graph
-        uses: gradle/actions/dependency-submission@v4
+        uses: gradle/actions/dependency-submission@v6
         continue-on-error: true
 
       # Check for available upgrades (requires com.github.ben-manes.versions plugin)
