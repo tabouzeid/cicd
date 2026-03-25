@@ -1,0 +1,198 @@
+name: Python CI
+
+# Reusable workflow — call this from any Python project:
+#
+#   pip project:
+#     jobs:
+#       ci:
+#         uses: <org>/cicd/.github/workflows/python.yml@main
+#         with:
+#           python-version: '3.12'
+#
+#   uv project:
+#     jobs:
+#       ci:
+#         uses: <org>/cicd/.github/workflows/python.yml@main
+#         with:
+#           package-manager: uv
+#           test-command: uv run pytest
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to use
+        type: string
+        default: '3.12'
+      package-manager:
+        description: Package manager to use (pip, uv)
+        type: string
+        default: 'pip'
+      install-command:
+        description: >
+          Command to install project dependencies.
+          Defaults: pip → "pip install -e .[dev]", uv → "uv sync"
+          Set explicitly to override.
+        type: string
+        default: ''
+      test-command:
+        description: Command to run the test suite
+        type: string
+        default: ''
+      lint-command:
+        description: Command to run the linter (set to empty string to skip)
+        type: string
+        default: 'ruff check . && ruff format --check .'
+      runs-on:
+        description: Runner label
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        if: ${{ inputs.package-manager == 'uv' }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          enable-cache: true
+
+      - name: Set up Python ${{ inputs.python-version }}
+        if: ${{ inputs.package-manager != 'uv' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          if [ "${{ inputs.install-command }}" != "" ]; then
+            ${{ inputs.install-command }}
+          elif [ "${{ inputs.package-manager }}" = "uv" ]; then
+            uv sync --all-extras
+          else
+            python -m pip install --upgrade pip
+            pip install -e ".[dev]"
+          fi
+
+      - name: Lint
+        if: ${{ inputs.lint-command != '' }}
+        run: ${{ inputs.lint-command }}
+        continue-on-error: true
+
+      - name: Test
+        run: |
+          if [ "${{ inputs.test-command }}" != "" ]; then
+            ${{ inputs.test-command }}
+          elif [ "${{ inputs.package-manager }}" = "uv" ]; then
+            uv run pytest
+          else
+            pytest
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-test-results
+          path: |
+            junit*.xml
+            test-results/
+            htmlcov/
+          if-no-files-found: ignore
+
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ${{ inputs.runs-on }}
+    if: always()
+    needs: build-and-test
+    permissions:
+      contents: write
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        if: ${{ inputs.package-manager == 'uv' }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          enable-cache: true
+
+      - name: Set up Python ${{ inputs.python-version }}
+        if: ${{ inputs.package-manager != 'uv' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          if [ "${{ inputs.install-command }}" != "" ]; then
+            ${{ inputs.install-command }}
+          elif [ "${{ inputs.package-manager }}" = "uv" ]; then
+            uv sync --all-extras
+          else
+            python -m pip install --upgrade pip
+            pip install -e ".[dev]"
+          fi
+
+      # Audit for known CVEs in installed packages
+      - name: pip-audit (security vulnerabilities)
+        run: |
+          if [ "${{ inputs.package-manager }}" = "uv" ]; then
+            uv tool run pip-audit --desc on --format columns
+          else
+            pip install pip-audit
+            pip-audit --desc on --format columns
+          fi
+        continue-on-error: true
+
+      # Report outdated packages
+      - name: Check for outdated packages
+        run: |
+          if [ "${{ inputs.package-manager }}" = "uv" ]; then
+            # uv lock --dry-run shows what would change; uv tree shows current state
+            uv tree --outdated 2>/dev/null || uv pip list --outdated 2>/dev/null || echo "uv outdated check not available in this version"
+          else
+            pip list --outdated --format=columns
+          fi
+        continue-on-error: true
+
+      # Broad filesystem scan (picks up any embedded wheels, etc.)
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: '0'
+          ignore-unfixed: false
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Trivy SARIF upload (for GitHub Security tab)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+        continue-on-error: true
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true

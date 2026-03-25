@@ -1,0 +1,175 @@
+name: Ansible CI
+
+# Reusable workflow — call this from any Ansible project:
+#
+#   jobs:
+#     ci:
+#       uses: <org>/cicd/.github/workflows/ansible.yml@main
+#       with:
+#         python-version: '3.12'
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to use
+        type: string
+        default: '3.12'
+      ansible-version:
+        description: Ansible version constraint (e.g. ">=9,<10" or "latest")
+        type: string
+        default: 'latest'
+      requirements-file:
+        description: pip requirements file for Python deps (set to empty to skip)
+        type: string
+        default: 'requirements.txt'
+      galaxy-requirements-file:
+        description: Ansible Galaxy requirements file (set to empty to skip)
+        type: string
+        default: 'requirements.yml'
+      lint-paths:
+        description: Space-separated list of paths/files to lint
+        type: string
+        default: '.'
+      molecule-scenario:
+        description: Molecule scenario to run (set to empty string to skip)
+        type: string
+        default: 'default'
+      runs-on:
+        description: Runner label
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ inputs.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Install Ansible
+        run: |
+          python -m pip install --upgrade pip
+          if [ "${{ inputs.ansible-version }}" = "latest" ]; then
+            pip install ansible ansible-lint
+          else
+            pip install "ansible${{ inputs.ansible-version }}" ansible-lint
+          fi
+
+      - name: Install Python requirements
+        if: ${{ inputs.requirements-file != '' }}
+        run: |
+          if [ -f "${{ inputs.requirements-file }}" ]; then
+            pip install -r ${{ inputs.requirements-file }}
+          else
+            echo "No ${{ inputs.requirements-file }} found, skipping."
+          fi
+
+      - name: Install Ansible Galaxy roles & collections
+        if: ${{ inputs.galaxy-requirements-file != '' }}
+        run: |
+          if [ -f "${{ inputs.galaxy-requirements-file }}" ]; then
+            ansible-galaxy install -r ${{ inputs.galaxy-requirements-file }}
+          else
+            echo "No ${{ inputs.galaxy-requirements-file }} found, skipping."
+          fi
+
+      - name: Lint with ansible-lint
+        run: ansible-lint ${{ inputs.lint-paths }}
+        continue-on-error: true
+
+      - name: Run Molecule tests
+        if: ${{ inputs.molecule-scenario != '' }}
+        run: |
+          if pip show molecule > /dev/null 2>&1; then
+            if [ -d "molecule/${{ inputs.molecule-scenario }}" ]; then
+              molecule test --scenario-name ${{ inputs.molecule-scenario }}
+            else
+              echo "No molecule/${{ inputs.molecule-scenario }} scenario found, skipping."
+            fi
+          else
+            pip install molecule molecule-plugins[docker]
+            if [ -d "molecule/${{ inputs.molecule-scenario }}" ]; then
+              molecule test --scenario-name ${{ inputs.molecule-scenario }}
+            else
+              echo "No molecule/${{ inputs.molecule-scenario }} scenario found, skipping."
+            fi
+          fi
+        continue-on-error: true
+
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ${{ inputs.runs-on }}
+    if: always()
+    needs: lint-and-test
+    permissions:
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ inputs.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Install Ansible and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ "${{ inputs.ansible-version }}" = "latest" ]; then
+            pip install ansible pip-audit
+          else
+            pip install "ansible${{ inputs.ansible-version }}" pip-audit
+          fi
+          if [ -n "${{ inputs.requirements-file }}" ] && [ -f "${{ inputs.requirements-file }}" ]; then
+            pip install -r ${{ inputs.requirements-file }}
+          fi
+
+      # Audit Python packages for known CVEs
+      - name: pip-audit (security vulnerabilities)
+        run: pip-audit --desc on --format columns
+        continue-on-error: true
+
+      # Report outdated Python packages
+      - name: Check for outdated packages
+        run: pip list --outdated --format=columns
+        continue-on-error: true
+
+      # Scan repo for embedded vulnerabilities
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: '0'
+          ignore-unfixed: false
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Trivy SARIF upload (for GitHub Security tab)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+        continue-on-error: true
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true

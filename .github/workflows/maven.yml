@@ -1,0 +1,130 @@
+name: Maven CI
+
+# Reusable workflow — call this from any Maven project:
+#
+#   jobs:
+#     ci:
+#       uses: <org>/cicd/.github/workflows/maven.yml@main
+#       with:
+#         java-version: '21'
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: JDK version to use
+        type: string
+        default: '21'
+      java-distribution:
+        description: JDK distribution (temurin, corretto, microsoft, zulu)
+        type: string
+        default: 'temurin'
+      maven-args:
+        description: Extra Maven arguments applied to every mvn invocation
+        type: string
+        default: '--batch-mode --no-transfer-progress'
+      build-goals:
+        description: Maven goals for the build step (tests skipped)
+        type: string
+        default: 'compile'
+      test-goals:
+        description: Maven goals for the test step
+        type: string
+        default: 'verify'
+      runs-on:
+        description: Runner label
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: ${{ inputs.java-distribution }}
+          cache: maven
+
+      - name: Build
+        run: mvn ${{ inputs.maven-args }} ${{ inputs.build-goals }} -DskipTests
+
+      - name: Test
+        run: mvn ${{ inputs.maven-args }} ${{ inputs.test-goals }}
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maven-test-results
+          path: |
+            **/target/surefire-reports/
+            **/target/failsafe-reports/
+          if-no-files-found: ignore
+
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ${{ inputs.runs-on }}
+    if: always()
+    needs: build-and-test
+    permissions:
+      contents: write
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: ${{ inputs.java-distribution }}
+          cache: maven
+
+      # Feeds GitHub dependency graph → enables Dependabot security alerts
+      - name: Submit dependency graph
+        uses: advanced-security/maven-dependency-submission-action@v4
+        continue-on-error: true
+
+      # Report available version upgrades
+      - name: Check for dependency updates
+        run: |
+          mvn ${{ inputs.maven-args }} versions:display-dependency-updates versions:display-plugin-updates \
+            -DprocessDependencyManagement=false
+        continue-on-error: true
+
+      # Scan for known CVEs
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: '0'
+          ignore-unfixed: false
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Trivy SARIF upload (for GitHub Security tab)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+        continue-on-error: true
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true

@@ -1,0 +1,166 @@
+name: Node CI
+
+# Reusable workflow — call this from any Node.js project:
+#
+#   jobs:
+#     ci:
+#       uses: <org>/cicd/.github/workflows/node.yml@main
+#       with:
+#         node-version: '22'
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version to use
+        type: string
+        default: '22'
+      package-manager:
+        description: Package manager to use (npm, yarn, pnpm)
+        type: string
+        default: 'npm'
+      install-command:
+        description: Install command (defaults to <pm> ci)
+        type: string
+        default: ''
+      build-command:
+        description: Build command (set to empty string to skip)
+        type: string
+        default: 'npm run build'
+      test-command:
+        description: Test command
+        type: string
+        default: 'npm test'
+      runs-on:
+        description: Runner label
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies
+        run: |
+          if [ -n "${{ inputs.install-command }}" ]; then
+            ${{ inputs.install-command }}
+          elif [ "${{ inputs.package-manager }}" = "yarn" ]; then
+            yarn install --frozen-lockfile
+          elif [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+            corepack enable pnpm && pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Build
+        if: ${{ inputs.build-command != '' }}
+        run: ${{ inputs.build-command }}
+
+      - name: Test
+        run: ${{ inputs.test-command }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-test-results
+          path: |
+            junit*.xml
+            test-results/
+            coverage/
+          if-no-files-found: ignore
+
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ${{ inputs.runs-on }}
+    if: always()
+    needs: build-and-test
+    permissions:
+      contents: write
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies
+        run: |
+          if [ -n "${{ inputs.install-command }}" ]; then
+            ${{ inputs.install-command }}
+          elif [ "${{ inputs.package-manager }}" = "yarn" ]; then
+            yarn install --frozen-lockfile
+          elif [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+            corepack enable pnpm && pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      # Audit for known CVEs
+      - name: npm audit (security vulnerabilities)
+        run: |
+          if [ "${{ inputs.package-manager }}" = "yarn" ]; then
+            yarn audit --level moderate || true
+          elif [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+            pnpm audit --audit-level moderate || true
+          else
+            npm audit --audit-level=moderate || true
+          fi
+        continue-on-error: true
+
+      # Report outdated packages
+      - name: Check for outdated packages
+        run: |
+          if [ "${{ inputs.package-manager }}" = "yarn" ]; then
+            yarn outdated || true
+          elif [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+            pnpm outdated || true
+          else
+            npm outdated || true
+          fi
+        continue-on-error: true
+
+      # Broad filesystem scan
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: '0'
+          ignore-unfixed: false
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Trivy SARIF upload (for GitHub Security tab)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+        continue-on-error: true
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true

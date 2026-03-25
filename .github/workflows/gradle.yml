@@ -1,0 +1,134 @@
+name: Gradle CI
+
+# Reusable workflow — call this from any Gradle project:
+#
+#   jobs:
+#     ci:
+#       uses: <org>/cicd/.github/workflows/gradle.yml@main
+#       with:
+#         java-version: '21'
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: JDK version to use
+        type: string
+        default: '21'
+      java-distribution:
+        description: JDK distribution (temurin, corretto, microsoft, zulu)
+        type: string
+        default: 'temurin'
+      build-command:
+        description: Command to compile/assemble (tests excluded)
+        type: string
+        default: './gradlew assemble'
+      test-command:
+        description: Command to run tests
+        type: string
+        default: './gradlew test'
+      runs-on:
+        description: Runner label
+        type: string
+        default: 'ubuntu-latest'
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: ${{ inputs.java-distribution }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build
+        run: ${{ inputs.build-command }}
+
+      - name: Test
+        run: ${{ inputs.test-command }}
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-test-results
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          if-no-files-found: ignore
+
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ${{ inputs.runs-on }}
+    # Run even if build-and-test fails so we still get security info
+    if: always()
+    needs: build-and-test
+    permissions:
+      contents: write          # required for dependency-submission API
+      security-events: write   # required to upload SARIF results
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: ${{ inputs.java-distribution }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Feeds the GitHub dependency graph → enables Dependabot security alerts
+      - name: Submit dependency graph
+        uses: gradle/actions/dependency-submission@v4
+        continue-on-error: true
+
+      # Check for available upgrades (requires com.github.ben-manes.versions plugin)
+      - name: Check for dependency updates
+        run: |
+          if ./gradlew help --task dependencyUpdates > /dev/null 2>&1; then
+            ./gradlew dependencyUpdates --refresh-dependencies
+          else
+            echo "Skipping dependencyUpdates — add the com.github.ben-manes.versions plugin to enable this report."
+          fi
+        continue-on-error: true
+
+      # Scan for known CVEs in all libraries
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: '0'
+          ignore-unfixed: false
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Trivy SARIF upload (for GitHub Security tab)
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+        continue-on-error: true
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true
