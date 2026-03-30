@@ -88,7 +88,7 @@ jobs:
 
       # Feeds GitHub dependency graph → enables Dependabot security alerts
       - name: Submit dependency graph
-        uses: advanced-security/maven-dependency-submission-action@v4
+        uses: advanced-security/maven-dependency-submission-action@v5
         continue-on-error: true
 
       # Report available version upgrades
