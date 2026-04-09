@@ -52,11 +52,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -n "${{ inputs.install-command }}" ]; then
-            ${{ inputs.install-command }}
-          elif [ "${{ inputs.package-manager }}" = "yarn" ]; then
+          custom="${{ inputs.install-command }}"
+          pm="${{ inputs.package-manager }}"
+          if [ -n "$custom" ]; then
+            eval "$custom"
+          elif [ "$pm" = "yarn" ]; then
             yarn install --frozen-lockfile
-          elif [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+          elif [ "$pm" = "pnpm" ]; then
             corepack enable pnpm && pnpm install --frozen-lockfile
           else
             npm ci
@@ -101,11 +103,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -n "${{ inputs.install-command }}" ]; then
-            ${{ inputs.install-command }}
-          elif [ "${{ inputs.package-manager }}" = "yarn" ]; then
+          custom="${{ inputs.install-command }}"
+          pm="${{ inputs.package-manager }}"
+          if [ -n "$custom" ]; then
+            eval "$custom"
+          elif [ "$pm" = "yarn" ]; then
             yarn install --frozen-lockfile
-          elif [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+          elif [ "$pm" = "pnpm" ]; then
             corepack enable pnpm && pnpm install --frozen-lockfile
           else
             npm ci
