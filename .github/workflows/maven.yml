@@ -35,6 +35,10 @@ on:
         description: Runner label
         type: string
         default: 'ubuntu-latest'
+    secrets:
+      DISCORD_WEBHOOK_URL:
+        description: Discord webhook URL for build notifications
+        required: false
 
 jobs:
   build-and-test:
@@ -128,3 +132,44 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
         continue-on-error: true
+
+  notify-discord:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    needs: [build-and-test, dependency-scan]
+    if: always()
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [[ "${{ needs.build-and-test.result }}" == "success" && \
+                "${{ needs.dependency-scan.result }}" != "failure" ]]; then
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+            echo "color=3066993" >> $GITHUB_OUTPUT
+            echo "label=passed" >> $GITHUB_OUTPUT
+          else
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+            echo "color=15158332" >> $GITHUB_OUTPUT
+            echo "label=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post to Discord
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -z "$WEBHOOK_URL" ] && echo "No webhook configured, skipping" && exit 0
+          curl -sf -H "Content-Type: application/json" \
+            -d "{
+              \"embeds\": [{
+                \"title\": \"${{ steps.status.outputs.emoji }} ${{ github.repository }} — ${{ steps.status.outputs.label }}\",
+                \"url\": \"https://gitea.tazindeed.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+                \"color\": ${{ steps.status.outputs.color }},
+                \"fields\": [
+                  {\"name\": \"Branch\", \"value\": \"\`${{ github.ref_name }}\`\", \"inline\": true},
+                  {\"name\": \"Triggered by\", \"value\": \"${{ github.actor }}\", \"inline\": true},
+                  {\"name\": \"Build & Test\", \"value\": \"${{ needs.build-and-test.result }}\", \"inline\": true},
+                  {\"name\": \"Dependency Scan\", \"value\": \"${{ needs.dependency-scan.result }}\", \"inline\": true}
+                ]
+              }]
+            }" \
+            "$WEBHOOK_URL"
