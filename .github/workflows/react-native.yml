@@ -117,6 +117,12 @@ jobs:
     name: Lint, Type-check & Test
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 20
+    env:
+      # Redirect npm cache and temp dir to the workspace Docker volume so
+      # heavy writes don't accumulate in the container's overlay2 RWLayer
+      # (large overlay2 writes trigger a Docker daemon bug: "RWLayer is unexpectedly nil")
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/.ci-npm-cache
+      TMPDIR: ${{ github.workspace }}/.ci-tmp
     steps:
       - name: Checkout
         uses: actions/checkout@v4
