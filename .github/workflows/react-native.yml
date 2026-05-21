@@ -1,0 +1,326 @@
+name: React Native CI
+
+# Reusable workflow — call this from any React Native or Expo project:
+#
+#   Bare React Native:
+#     jobs:
+#       ci:
+#         uses: <org>/cicd/.github/workflows/react-native.yml@main
+#         secrets: inherit
+#
+#   Expo (managed or bare):
+#     jobs:
+#       ci:
+#         uses: <org>/cicd/.github/workflows/react-native.yml@main
+#         with:
+#           expo: true
+#           test-command: 'npx jest --passWithNoTests'
+#         secrets: inherit
+#
+#   With Android build:
+#     jobs:
+#       ci:
+#         uses: <org>/cicd/.github/workflows/react-native.yml@main
+#         with:
+#           build-android: true
+#         secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version to use
+        type: string
+        default: '22'
+      package-manager:
+        description: Package manager to use (npm, yarn, pnpm)
+        type: string
+        default: 'npm'
+      install-command:
+        description: Install command override (defaults to <pm> ci / install --frozen-lockfile)
+        type: string
+        default: ''
+      lint-command:
+        description: Lint command (set to empty string to skip)
+        type: string
+        default: 'npx eslint . --max-warnings=0'
+      typecheck-command:
+        description: TypeScript type-check command (set to empty string to skip)
+        type: string
+        default: 'npx tsc --noEmit'
+      test-command:
+        description: Test command (set to empty string to skip)
+        type: string
+        default: 'npx jest --passWithNoTests --ci'
+      expo:
+        description: Set to true for Expo projects (runs npx expo-doctor, skips native Android build)
+        type: boolean
+        default: false
+      build-android:
+        description: Build a debug APK via Gradle to validate native code compiles (ignored for Expo managed workflow)
+        type: boolean
+        default: false
+      java-version:
+        description: JDK version required for Android builds
+        type: string
+        default: '17'
+      android-build-command:
+        description: Gradle command to build Android (only used when build-android is true)
+        type: string
+        default: 'cd android && ./gradlew assembleDebug --no-daemon'
+      runs-on:
+        description: Runner label for lint/test job
+        type: string
+        default: 'ubuntu-latest'
+      android-runs-on:
+        description: Runner label for Android build job
+        type: string
+        default: 'ubuntu-latest'
+    secrets:
+      DISCORD_WEBHOOK_URL:
+        description: Discord webhook URL for build notifications
+        required: false
+
+jobs:
+  lint-and-test:
+    name: Lint, Type-check & Test
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies
+        run: |
+          custom="${{ inputs.install-command }}"
+          pm="${{ inputs.package-manager }}"
+          if [ -n "$custom" ]; then
+            eval "$custom"
+          elif [ "$pm" = "yarn" ]; then
+            yarn install --frozen-lockfile
+          elif [ "$pm" = "pnpm" ]; then
+            corepack enable pnpm && pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Type-check
+        if: ${{ inputs.typecheck-command != '' }}
+        run: ${{ inputs.typecheck-command }}
+        continue-on-error: true
+
+      - name: Lint
+        if: ${{ inputs.lint-command != '' }}
+        run: ${{ inputs.lint-command }}
+        continue-on-error: true
+
+      - name: Run Expo doctor
+        if: ${{ inputs.expo == true }}
+        run: npx expo-doctor
+        continue-on-error: true
+
+      - name: Test
+        if: ${{ inputs.test-command != '' }}
+        run: ${{ inputs.test-command }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rn-test-results
+          path: |
+            junit*.xml
+            test-results/
+            coverage/
+          if-no-files-found: ignore
+
+  build-android:
+    name: Build Android (Debug)
+    runs-on: ${{ inputs.android-runs-on }}
+    # Only run when explicitly requested and not an Expo managed project
+    if: ${{ inputs.build-android == true && inputs.expo == false }}
+    needs: lint-and-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+
+      - name: Install dependencies
+        run: |
+          custom="${{ inputs.install-command }}"
+          pm="${{ inputs.package-manager }}"
+          if [ -n "$custom" ]; then
+            eval "$custom"
+          elif [ "$pm" = "yarn" ]; then
+            yarn install --frozen-lockfile
+          elif [ "$pm" = "pnpm" ]; then
+            corepack enable pnpm && pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build Android debug APK
+        run: ${{ inputs.android-build-command }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: ignore
+
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ${{ inputs.runs-on }}
+    if: always()
+    needs: lint-and-test
+    permissions:
+      contents: write
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js ${{ inputs.node-version }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies
+        run: |
+          custom="${{ inputs.install-command }}"
+          pm="${{ inputs.package-manager }}"
+          if [ -n "$custom" ]; then
+            eval "$custom"
+          elif [ "$pm" = "yarn" ]; then
+            yarn install --frozen-lockfile
+          elif [ "$pm" = "pnpm" ]; then
+            corepack enable pnpm && pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      # Audit for known CVEs
+      - name: npm audit (security vulnerabilities)
+        run: |
+          if [ "${{ inputs.package-manager }}" = "yarn" ]; then
+            yarn audit --level moderate || true
+          elif [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+            pnpm audit --audit-level moderate || true
+          else
+            npm audit --audit-level=moderate || true
+          fi
+        continue-on-error: true
+
+      # Report outdated packages
+      - name: Check for outdated packages
+        run: |
+          if [ "${{ inputs.package-manager }}" = "yarn" ]; then
+            yarn outdated || true
+          elif [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+            pnpm outdated || true
+          else
+            npm outdated || true
+          fi
+        continue-on-error: true
+
+      # Broad filesystem scan
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: '0'
+          ignore-unfixed: false
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - name: Trivy SARIF upload (for GitHub Security tab)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          vuln-type: library
+          severity: CRITICAL,HIGH,MEDIUM
+        continue-on-error: true
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true
+
+  notify-discord:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, build-android, dependency-scan]
+    if: always()
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          lint_result="${{ needs.lint-and-test.result }}"
+          android_result="${{ needs.build-android.result }}"
+          scan_result="${{ needs.dependency-scan.result }}"
+
+          # build-android is skipped when not requested — treat skipped as neutral
+          android_ok=$([[ "$android_result" == "failure" ]] && echo "false" || echo "true")
+
+          if [[ "$lint_result" == "success" && \
+                "$android_ok" == "true" && \
+                "$scan_result" != "failure" ]]; then
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+            echo "color=3066993" >> $GITHUB_OUTPUT
+            echo "label=passed" >> $GITHUB_OUTPUT
+          else
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+            echo "color=15158332" >> $GITHUB_OUTPUT
+            echo "label=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post to Discord
+        env:
+          WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          [ -z "$WEBHOOK_URL" ] && echo "No webhook configured, skipping" && exit 0
+          curl -sf -H "Content-Type: application/json" \
+            -d "{
+              \"embeds\": [{
+                \"title\": \"${{ steps.status.outputs.emoji }} ${{ github.repository }} — ${{ steps.status.outputs.label }}\",
+                \"url\": \"https://gitea.tazindeed.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\",
+                \"color\": ${{ steps.status.outputs.color }},
+                \"fields\": [
+                  {\"name\": \"Branch\", \"value\": \"\`${{ github.ref_name }}\`\", \"inline\": true},
+                  {\"name\": \"Triggered by\", \"value\": \"${{ github.actor }}\", \"inline\": true},
+                  {\"name\": \"Lint & Test\", \"value\": \"${{ needs.lint-and-test.result }}\", \"inline\": true},
+                  {\"name\": \"Android Build\", \"value\": \"${{ needs.build-android.result }}\", \"inline\": true},
+                  {\"name\": \"Dependency Scan\", \"value\": \"${{ needs.dependency-scan.result }}\", \"inline\": true}
+                ]
+              }]
+            }" \
+            "$WEBHOOK_URL"
